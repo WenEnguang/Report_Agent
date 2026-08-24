@@ -1,7 +1,10 @@
 .env
+<<<<<<< HEAD
 
 .vscode/
 
 __pycache__/
 
 *.md
+=======
+>>>>>>> f0b8a0739eeb24886dce58617ebfe0820f0b2c32
