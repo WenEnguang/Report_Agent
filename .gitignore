@@ -4,6 +4,4 @@
 
 __pycache__/
 
-docs/
-
-*.md
+report*.md
