@@ -30,6 +30,7 @@ from langgraph.graph import StateGraph, END, START
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from pydantic import SecretStr
+from concurrent.futures import ThreadPoolExecutor  
 
 load_dotenv()
 
@@ -60,6 +61,8 @@ MAX_FETCH_ROUNDS = 3
 MAX_CHARS_PER_FILE_PATCH_DEEP = 1500
 # 防止上下文超出窗口（当前模型不会，但是作为预先数据处理点）
 MAX_TOTAL_PROMPT_CHARS = 180_000
+# 并行化处理
+MAX_DIFF_WORKERS = 8
 
 # 低信息量commit message黑名单，命中的不拉diff，省调用次数和token
 LOW_INFO_MESSAGES = {
@@ -372,45 +375,50 @@ def fetch_commit_diffs(state: MonthlyReportState) -> dict:
           （第一轮永远是 0，深挖永远进不去）。改成每轮 +1 后：
           第一轮进入时 0 → 普通模式 → 返回 1；第二轮进入时 1 → 深挖模式。
           终止判定在 route_after_analysis：deepen_rounds >= MAX_FETCH_ROUNDS。
+          新增：并发拉取diff
     """
     owner = state["github_username"]
     repo = state["repo_name"]
-
-    # 不是第一轮 = 深挖模式（计数器语义见函数docstring）
     deep_mode = state["deepen_rounds"] > 0
 
+    # 第一步：将commit分成拉取和保留
+    to_fetch:list = []
+
+    for commit in state['github_commits']:
+        if commit.get('diff_summary') is not None:
+            continue
+        elif _is_low_info_message(commit['message']) and not deep_mode:
+            continue
+        else:
+            max_char = MAX_CHARS_PER_FILE_PATCH_DEEP if deep_mode else MAX_CHARS_PER_FILE_PATCH
+            to_fetch.append((commit,max_char))
+    # 第二步：并发拉取diff
+    diff_by_sha:dict = {}
+    with ThreadPoolExecutor(max_workers=MAX_DIFF_WORKERS) as pool:
+        futures = [(c, pool.submit(_fetch_commit_diff, owner, repo, c["sha"], max_chars=mc))
+                   for c, mc in to_fetch]
+        for commit, fut in futures:
+            try:
+                diff_by_sha[commit["sha"]] = fut.result() or None
+            except Exception as e:
+                diff_by_sha[commit['sha']] = None
+                print(f"[警告] 拉取 diff 失败，已置空: {commit['sha'][:7]}（{e}）")
+    # 第三步：按照原顺序组装最终列表
     updated_commits: List[CommitInfo] = []
-    for c in state["github_commits"]:
-        # 已有 diff 的不用重拉（深挖只补第一轮留下的缺口，省 API 调用）
-        if c.get("diff_summary") is not None:
-            updated_commits.append(c)
-            continue
-
-        # 低信息量 commit：普通模式跳过（省 token），深挖模式也要拉（循环的增量信息）
-        if _is_low_info_message(c["message"]) and not deep_mode:
-            updated_commits.append(c)  # 保持diff_summary=None
-            continue
-
-        # 拉 diff：深挖模式用更大的截断窗口，拿到更多细节
-        diff_text = _fetch_commit_diff(
-            owner, repo, c["sha"],
-            max_chars=MAX_CHARS_PER_FILE_PATCH_DEEP if deep_mode else MAX_CHARS_PER_FILE_PATCH,
-        )
-        updated_commits.append(
-            CommitInfo(
-                sha=c["sha"],
-                message=c["message"],
-                date=c["date"],
-                diff_summary=diff_text or None,
-            )
-        )
-
-    # 每轮 +1（含第一轮），供路由函数判终止；路由函数本身是只读的
+    for commit in state["github_commits"]:
+        if commit['sha'] in diff_by_sha:
+            updated_commits.append(CommitInfo(
+                sha=commit["sha"],
+                message=commit["message"],
+                date=commit["date"],
+                diff_summary=diff_by_sha[commit["sha"]],
+            ))
+        else:
+            updated_commits.append(commit)
     return {
         "github_commits": updated_commits,
         "deepen_rounds": state["deepen_rounds"] + 1,
     }
-
 
 # ---------------------------------------------------------------------------
 # 2. 节点函数 —— 汇合节点：LLM 分析
