@@ -14,6 +14,8 @@ GitHub活动 + 本地笔记学习记录 → 自动月报生成 Agent
     - 用 git ls-files 拿文件列表，而不是 os.walk——
       路径与 commit 历史严格一致（避 Windows 大小写坑），且天然排除未跟踪文件
     - scan（拿元数据）与 parse（读内容）拆成两个节点，职责单一
+    - Phase 2.5：analyze_tech_points 后加条件路由做质量关卡——分析不充分时
+      自动循环回 fetch_commit_diffs 深挖一轮，充分/超轮数才出报告
 """
 
 import os
@@ -28,6 +30,7 @@ from langgraph.graph import StateGraph, END, START
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from pydantic import SecretStr
+from IPython.display import display
 
 load_dotenv()
 
@@ -46,6 +49,16 @@ MAX_CHARS_PER_FILE_PATCH = 1200
 # token 爆炸、稀释重点、甚至超上下文窗口，所以截断到固定长度（与上面的
 # commit diff 截断同一思路）。后续可升级为分块 / 先摘要再分析。
 MAX_CHARS_PER_NOTE = 4000
+
+# ---- Phase 2.5 条件路由常量 ----
+# 充分性判定：技术点少于这个数 → 不充分，触发深挖循环
+MIN_TECH_POINTS = 3
+# 拉取轮数上限（含第一轮）：第一轮 + 最多 2 轮深挖 = 3。
+# 为什么是 3 而不是 2？计数器区分"第一轮"和"深挖轮"需要余量，
+# 具体见 fetch_commit_diffs 里的自洽性说明
+MAX_FETCH_ROUNDS = 3
+# 深挖模式下 diff 截断窗口（第一轮 1200，深挖放大拿更多细节）
+MAX_CHARS_PER_FILE_PATCH_DEEP = 1500
 
 # 低信息量commit message黑名单，命中的不拉diff，省调用次数和token
 LOW_INFO_MESSAGES = {
@@ -109,6 +122,7 @@ class MonthlyReportState(TypedDict):
     analysis_notes: List[TechPoint]
     note_files: List[NoteFileInfo]      # 扫描出的本月笔记文件（元数据）
     note_contents: List[NoteContent]    # 解析出的本月笔记正文
+    deepen_rounds: int                  # 条件路由：已执行的拉取轮数（初始0，fetch_commit_diffs 每轮+1）
 
     final_report_md: str
     output_path: str
@@ -302,11 +316,18 @@ def _is_low_info_message(message: str) -> bool:
     return False
 
 
-def _fetch_commit_diff(owner: str, repo: str, sha: str) -> str:
+def _fetch_commit_diff(
+    owner: str, repo: str, sha: str,
+    max_chars: int = MAX_CHARS_PER_FILE_PATCH,
+    max_files: int = MAX_FILES_PER_COMMIT,
+) -> str:
     """
     2026-08-21 实验验证过：能挖出commit message看不到的技术细节
     （例：FACT_CHECK_CASES那条diff暴露了"RewardAcc上涨≠质量变好"的关键判断）。
     截断参数已按实验结果从500字符/文件调整为1200字符/文件。
+
+    Phase 2.5：max_chars / max_files 参数化——深挖模式可传入更大的窗口
+    （MAX_CHARS_PER_FILE_PATCH_DEEP）拿到更多 diff 细节。
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{sha}"
     headers = {
@@ -321,7 +342,7 @@ def _fetch_commit_diff(owner: str, repo: str, sha: str) -> str:
         )
 
     data = response.json()
-    files = data.get("files", [])[:MAX_FILES_PER_COMMIT]
+    files = data.get("files", [])[:max_files]
 
     diff_parts = []
     for f in files:
@@ -330,7 +351,7 @@ def _fetch_commit_diff(owner: str, repo: str, sha: str) -> str:
         if not patch:
             diff_parts.append(f"[{filename}] (无文本diff，可能是二进制文件或改动过大)")
             continue
-        truncated = patch[:MAX_CHARS_PER_FILE_PATCH]
+        truncated = patch[:max_chars]
         diff_parts.append(f"[{filename}]\n{truncated}")
 
     return "\n\n".join(diff_parts) if diff_parts else ""
@@ -338,19 +359,42 @@ def _fetch_commit_diff(owner: str, repo: str, sha: str) -> str:
 
 def fetch_commit_diffs(state: MonthlyReportState) -> dict:
     """
-    对非低信息量commit拉diff，填充diff_summary字段。
-    不mutate传入的commit list，构造新列表返回。
+    对 commit 拉 diff，填充 diff_summary 字段。不 mutate 传入的 list，构造新列表返回。
+
+    Phase 2.5 深挖模式（条件路由循环回来的轮次）：
+        - 深挖判定：state["deepen_rounds"] > 0（即"不是第一轮"）
+        - 深挖动作：第一轮为省 token 跳过的"低信息量 commit"，
+          深挖时也要拉 diff——这是循环的【增量信息】，没有它循环就是空转；
+          同时 diff 截断窗口从 1200 放大到 MAX_CHARS_PER_FILE_PATCH_DEEP。
+        - 每轮运行都返回 deepen_rounds + 1（计数器 = 拉取轮数，含第一轮）：
+          【自洽性修正】原设计"深挖模式才 +1"和"深挖模式要求 >0"互相矛盾
+          （第一轮永远是 0，深挖永远进不去）。改成每轮 +1 后：
+          第一轮进入时 0 → 普通模式 → 返回 1；第二轮进入时 1 → 深挖模式。
+          终止判定在 route_after_analysis：deepen_rounds >= MAX_FETCH_ROUNDS。
     """
     owner = state["github_username"]
     repo = state["repo_name"]
 
+    # 不是第一轮 = 深挖模式（计数器语义见函数docstring）
+    deep_mode = state["deepen_rounds"] > 0
+
     updated_commits: List[CommitInfo] = []
     for c in state["github_commits"]:
-        if _is_low_info_message(c["message"]):
+        # 已有 diff 的不用重拉（深挖只补第一轮留下的缺口，省 API 调用）
+        if c.get("diff_summary") is not None:
+            updated_commits.append(c)
+            continue
+
+        # 低信息量 commit：普通模式跳过（省 token），深挖模式也要拉（循环的增量信息）
+        if _is_low_info_message(c["message"]) and not deep_mode:
             updated_commits.append(c)  # 保持diff_summary=None
             continue
 
-        diff_text = _fetch_commit_diff(owner, repo, c["sha"])
+        # 拉 diff：深挖模式用更大的截断窗口，拿到更多细节
+        diff_text = _fetch_commit_diff(
+            owner, repo, c["sha"],
+            max_chars=MAX_CHARS_PER_FILE_PATCH_DEEP if deep_mode else MAX_CHARS_PER_FILE_PATCH,
+        )
         updated_commits.append(
             CommitInfo(
                 sha=c["sha"],
@@ -360,7 +404,11 @@ def fetch_commit_diffs(state: MonthlyReportState) -> dict:
             )
         )
 
-    return {"github_commits": updated_commits}
+    # 每轮 +1（含第一轮），供路由函数判终止；路由函数本身是只读的
+    return {
+        "github_commits": updated_commits,
+        "deepen_rounds": state["deepen_rounds"] + 1,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +511,51 @@ def analyze_tech_points(state: MonthlyReportState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 2. 节点函数 —— Phase 2.5 条件路由（质量关卡）
+# ---------------------------------------------------------------------------
+
+def _is_analysis_sufficient(analysis_notes: List[TechPoint]) -> bool:
+    """
+    充分性判定（设计定稿）——返回 True = 可以出报告，False = 需要深挖。
+    三条规则，【全部满足】才算充分：
+        1. 分析结果非空（len > 0）
+        2. 技术点数量 >= MIN_TECH_POINTS（阈值 3：撑不起一份像样月报 = 不充分）
+        3. 每条 TechPoint 的 difficulty 和 solution 都非空（字段质量差 = 不充分）
+    """
+    # 规则1 + 规则2：分析结果非空 且 数量达标
+    if not analysis_notes or len(analysis_notes) < MIN_TECH_POINTS:
+        return False
+    # 规则3：每条 difficulty / solution 都非空（字段质量差 = 不充分）
+    for p in analysis_notes:
+        if not p.get("difficulty") or not p.get("solution"):
+            return False
+    return True
+
+
+def route_after_analysis(state: MonthlyReportState) -> str:
+    """
+    条件路由函数——LangGraph 条件边的核心（面试重点）。
+        - 【只读】state，不改 state（计数 +1 是 fetch_commit_diffs 节点的事）
+        - 返回字符串 key，必须匹配 build_graph 里 path_map 的键：
+          "deepen"（循环深挖）/ "sufficient"（出报告）
+    判定顺序（顺序很重要，逐条实现）：
+        1. 终止优先：deepen_rounds >= MAX_FETCH_ROUNDS → "sufficient"（防死循环）
+        2. 没有 commit 可深挖 → "sufficient"（深挖要有东西可挖，空转没意义）
+        3. _is_analysis_sufficient(analysis_notes) → 充分走 "sufficient"，否则 "deepen"
+    """
+    # 1. 终止优先：拉取轮数用尽，强制出报告（防死循环）
+    if state["deepen_rounds"] >= MAX_FETCH_ROUNDS:
+        return "sufficient"
+    # 2. 没有 commit 可深挖，直接出报告（空转没意义）
+    if not state["github_commits"]:
+        return "sufficient"
+    # 3. 充分性判定：充分出报告，不充分深挖
+    if _is_analysis_sufficient(state["analysis_notes"]):
+        return "sufficient"
+    return "deepen"
+
+
+# ---------------------------------------------------------------------------
 # 2. 节点函数 —— 出报告
 # ---------------------------------------------------------------------------
 
@@ -531,8 +624,15 @@ def build_graph():
     # （LangGraph 的语义：一个节点只有等它所有上游边都完成后才会执行）
     graph.add_edge("fetch_commit_diffs", "analyze_tech_points")
     graph.add_edge("parse_md_files", "analyze_tech_points")
-    # 出报告
-    graph.add_edge("analyze_tech_points", "generate_report")
+    # 出报告（Phase 2.5：改成条件边——分析不充分时循环回 fetch_commit_diffs 深挖）
+    graph.add_conditional_edges(
+        "analyze_tech_points",
+        route_after_analysis,
+        {
+            "deepen": "fetch_commit_diffs",    # 不充分 → 深挖一轮（图里的循环）
+            "sufficient": "generate_report",   # 充分 / 超轮数 → 出报告
+        },
+    )
     graph.add_edge("generate_report", "save_report")
     graph.add_edge("save_report", END)
 
@@ -547,6 +647,7 @@ if __name__ == "__main__":
     # 入口只做三件事：建图 -> 填初值 -> invoke。
     # 所有业务逻辑（扫描、解析、LLM 分析）都在节点函数里，不要写在这里。
     app = build_graph()
+    display(app)
 
     notes_dir = os.environ.get("NOTES_DIR")
     if not notes_dir:
@@ -561,6 +662,7 @@ if __name__ == "__main__":
         "analysis_notes": [],
         "note_files": [],
         "note_contents": [],
+        "deepen_rounds": 0,   # 条件路由：拉取轮数计数（初始 0）
         "final_report_md": "",
         "output_path": f"docs/report_{date.today().isoformat()}.md",
     }
