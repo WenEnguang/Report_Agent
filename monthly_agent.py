@@ -30,7 +30,6 @@ from langgraph.graph import StateGraph, END, START
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from pydantic import SecretStr
-from IPython.display import display
 
 load_dotenv()
 
@@ -59,6 +58,8 @@ MIN_TECH_POINTS = 3
 MAX_FETCH_ROUNDS = 3
 # 深挖模式下 diff 截断窗口（第一轮 1200，深挖放大拿更多细节）
 MAX_CHARS_PER_FILE_PATCH_DEEP = 1500
+# 防止上下文超出窗口（当前模型不会，但是作为预先数据处理点）
+MAX_TOTAL_PROMPT_CHARS = 180_000
 
 # 低信息量commit message黑名单，命中的不拉diff，省调用次数和token
 LOW_INFO_MESSAGES = {
@@ -435,7 +436,7 @@ ANALYSIS_PROMPT = """你是一位帮助开发者复盘技术成长的助手。�
 """
 
 
-def _format_commits_for_prompt(commits: List[CommitInfo]) -> str:
+def _format_commits_for_prompt(commits: List[CommitInfo],budget:dict) -> str:
     """把 commit 列表拼成 prompt 可用的文本。"""
     parts = []
     for c in commits:
@@ -443,20 +444,32 @@ def _format_commits_for_prompt(commits: List[CommitInfo]) -> str:
         part = f"- commit: {first_line}"
         if c.get("diff_summary"):
             part += f"\n  改动详情:\n{c['diff_summary']}"
-        parts.append(part)
+        cost = len(part)
+        if budget['used'] + cost > budget['max']:
+            if _is_low_info_message(c['message']) or c.get('diff_summary') is None:
+                continue
+            else:
+                break
+        else:
+            budget['used'] += cost
+            parts.append(part)
     return "\n\n".join(parts)
 
 
-def _format_notes_for_prompt(notes: List[NoteContent]) -> str:
-    """把笔记列表拼成 prompt 可用的文本（与 _format_commits_for_prompt 对称）。"""
+def _format_notes_for_prompt(notes: List[NoteContent],budget:dict) -> str:
+    """ 把笔记列表拼成 prompt 可用的文本（与 _format_commits_for_prompt 对称）。"""
     parts = []
     for n in notes:
-        # path 让 LLM 知道"这是哪篇笔记"，content 是完整正文
         content = n["content"]
-        # 截断到 MAX_CHARS_PER_NOTE，控制 token 成本（见顶部常量注释）
         if len(content) > MAX_CHARS_PER_NOTE:
             content = content[:MAX_CHARS_PER_NOTE] + "\n...[内容过长，已截断]"
-        parts.append(f"### 笔记: {n['path']}\n{content}")
+        part = f"### 笔记: {n['path']}\n{content}"
+        cost = len(part)
+        if budget['used'] + cost > budget['max']:
+            break
+        else:
+            budget['used'] += cost
+            parts.append(part)
     return "\n\n".join(parts)
 
 
@@ -477,9 +490,9 @@ def analyze_tech_points(state: MonthlyReportState) -> dict:
     # 两个数据源都为空时直接短路，省一次 LLM 调用（也省 token 成本）
     if not commits and not notes:
         return {"analysis_notes": []}
-
-    commits_text = _format_commits_for_prompt(commits)
-    notes_text = _format_notes_for_prompt(notes)
+    budget = {"used": 0, "max": MAX_TOTAL_PROMPT_CHARS}
+    notes_text = _format_notes_for_prompt(notes,budget)
+    commits_text = _format_commits_for_prompt(commits,budget)
     prompt = ANALYSIS_PROMPT.format(commits_text=commits_text, notes_text=notes_text)
 
     model = get_llm()
@@ -507,6 +520,7 @@ def analyze_tech_points(state: MonthlyReportState) -> dict:
         )
         for item in parsed
     ]
+    print(f"[预算] 已用 {budget['used']} / {budget['max']} 字符 (≈{budget['used'] / 1.4:.0f} token)")
     return {"analysis_notes": tech_points}
 
 
@@ -647,7 +661,6 @@ if __name__ == "__main__":
     # 入口只做三件事：建图 -> 填初值 -> invoke。
     # 所有业务逻辑（扫描、解析、LLM 分析）都在节点函数里，不要写在这里。
     app = build_graph()
-    display(app)
 
     notes_dir = os.environ.get("NOTES_DIR")
     if not notes_dir:
