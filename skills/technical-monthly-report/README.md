@@ -1,6 +1,6 @@
 # Technical Monthly Report Skill
 
-这是从 `WenEnguang/Report_Agent` 提炼出的可复用工作流型 Skill。
+ 从`Report_Agent` 提炼出的可复用工作流型 Skill。
 
 ## 特点
 
