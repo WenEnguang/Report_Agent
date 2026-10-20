@@ -1,0 +1,17 @@
+{
+  "time_range": {
+    "since": "2026-08-01",
+    "until": "2026-08-31"
+  },
+  "github": {
+    "repo": "WenEnguang/Report_Agent",
+    "username": "WenEnguang"
+  },
+  "notes": {
+    "directory": "E:/Markdown"
+  },
+  "output_path": "docs/report_2026-08-31.md",
+  "language": "zh-CN",
+  "max_fetch_rounds": 3,
+  "min_tech_points": 3
+}
