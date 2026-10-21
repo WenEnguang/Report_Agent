@@ -1,66 +1,77 @@
-# Technical Monthly Report Skill
+# technical-monthly-report（可复用 workflow skill）
 
- 从`Report_Agent` 提炼出的可复用工作流型 Skill。
+本目录是一个**自包含**的 workflow-based skill 包：只下载本目录，也能完成输入准备、调用与输出理解。
 
-## 特点
+## 1) 这是什么
 
-- GitHub commits + diff 与本地 Git Markdown 笔记双源输入；
-- LangGraph 风格的并行分支和汇合；
-- 条件边质量关卡；
-- 不充分时有限次数深挖；
-- Token/字符预算控制；
-- Markdown 月报输出；
-- 单条数据失败隔离。
+- 这是 **Agent Skill 定义**，不是可直接 `pip install` 的 Python 包。
+- 本目录不提供 `generate_monthly_report()` 这类可直接导入调用的函数。
+- 你应把本目录交给支持 Skill 的 Agent/运行时执行。
 
-## 使用方式
+入口文档：`./SKILL.md`
 
-将 `SKILL.md` 作为 Skill 定义文件交给支持 Skill 的 Agent 或运行时，并提供：
-
-```yaml
-time_range:
-  since: 2026-08-01
-  until: 2026-08-31
-github:
-  repo: WenEnguang/Report_Agent
-  username: WenEnguang
-notes:
-  directory: E:/Markdown
-output_path: docs/report_2026-08-31.md
-```
-
-然后发出：
+## 2) 目录结构与用途
 
 ```text
-请使用 technical-monthly-report Skill，生成指定时间范围的中文技术月报。
+technical-monthly-report/
+├─ SKILL.md                      # Skill 主契约（输入/输出/终止/降级/权限）
+├─ README.md                     # 使用说明（本文件）
+├─ manifest.yaml                 # 清单：入口、示例、依赖能力、实现状态
+├─ references/
+│  └─ workflow.md                # 工作流逻辑节点与节点契约参考
+├─ prompts/
+│  └─ generate_report.md         # 报告生成模板（变量与输出要求）
+└─ examples/
+   └─ input.yaml                 # 合法 YAML 输入示例（最小+扩展）
 ```
 
-## 与 LangGraph 的关系
+## 3) 快速使用（仅下载本目录）
 
-Skill 是对外的业务能力；LangGraph 是内部编排实现。可以将当前仓库的 `monthly_agent.py` 拆分为：
+### 步骤 A：复制目录
+将 `technical-monthly-report/` 放到你的 Skill 搜索路径下。
+
+### 步骤 B：准备输入
+参考 `examples/input.yaml`，至少提供：
+- `time_range.since`
+- `time_range.until`
+- `github.repo`
+- `github.username`
+- `notes.directory`
+
+### 步骤 C：调用 Skill（示例）
 
 ```text
-state.py       State Schema
-nodes/         各节点实现
-routes/        条件边和质量判断
-graph.py       StateGraph 构建
-skill.py       对外 run() 接口
+请使用 technical-monthly-report skill。
+输入参数使用 examples/input.yaml 中的 monthly_report_request。
+输出中文技术月报，并返回 warnings/errors 与 stats。
 ```
 
-## 最小调用接口
+## 4) 输入输出要点
 
-```python
-result = generate_monthly_report(
-    time_range=("2026-08-01", "2026-08-31"),
-    repo_name="WenEnguang/Report_Agent",
-    github_username="WenEnguang",
-    notes_dir="E:/Markdown",
-)
-```
+- 输入契约：见 `SKILL.md` 第 3 节
+- 输出契约：见 `SKILL.md` 第 4 节
+- 提示模板：见 `prompts/generate_report.md`
 
-## 注意事项
+## 5) 运行时依赖与权限
 
-1. `notes.directory` 必须是本地 Git 仓库路径；
-2. GitHub 私有仓库需要有效 Token；
-3. 不要把 API Key 写入 Skill 文件；
-4. Skill 只负责预定义的报告工作流，不负责开放式研究规划；
-5. 如果需要自主决定研究方向，应由上层 Agent 调用本 Skill。
+- GitHub API 读取权限（私有仓库需 token）
+- 本地 notes Git 仓库读取权限（`git ls-files`、`git log`、文件读取）
+- 可访问 LLM 服务
+
+如果任一能力不可用，必须返回 `warnings` 或 `errors`，不能伪造成功。
+
+## 6) 常见故障排查
+
+1. **报错：notes 目录不可访问**  
+   - 检查 `notes.directory` 是否为绝对路径，且目录是 Git 仓库
+2. **报错：GitHub 401/403**  
+   - 检查 token 是否有效且具备目标仓库读取权限
+3. **输出为空或技术点过少**  
+   - 扩大 `time_range`，或提高输入数据质量；必要时增大 `constraints.max_fetch_rounds`
+4. **只返回部分结果（partial）**  
+   - 查看 `warnings`，确认是 GitHub 还是 notes 数据源降级
+
+## 7) 与仓库根目录实现的关系
+
+本 Skill 可独立使用，不依赖仓库根目录文件。  
+根目录 `monthly_agent.py` 仅是同类工作流的历史实现参考，不是本 Skill 的运行前置条件。

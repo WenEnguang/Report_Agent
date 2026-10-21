@@ -140,7 +140,7 @@ docs/
 ├── Notes数据流转说明.md     笔记链路数据流
 └── report_*.md             生成的月报样例
 skills/
-└── technical-monthly-report/ 可复用 Skill（工作流定义 / 提示词 / 示例输入）
+└── technical-monthly-report/ 自包含 Skill 包（SKILL 契约 / manifest / workflow 参考 / prompt / YAML 示例）
 test/
 └── *.py                    链路拆分调试脚本
 ```
@@ -161,6 +161,14 @@ test/
 
 ---
 
+## 🧩 可复用 Skill 说明（skills/technical-monthly-report）
+
+- 该目录可被**单独复制**并交给支持 Skill 的 Agent/运行时使用；
+- 入口为 `skills/technical-monthly-report/SKILL.md`；
+- 该 Skill 为 workflow-based 定义，不提供可直接 import 的 Python API（如 `generate_monthly_report()`）；
+- 输入示例见 `skills/technical-monthly-report/examples/input.yaml`，工作流节点契约见 `skills/technical-monthly-report/references/workflow.md`。
+
+---
 ## 🗺️ Roadmap
 
 - [ ] 笔记截断升级：分块（chunking）/ 先摘要再分析，替代简单截断

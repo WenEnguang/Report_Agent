@@ -1,17 +1,41 @@
-{
-  "time_range": {
-    "since": "2026-08-01",
-    "until": "2026-08-31"
-  },
-  "github": {
-    "repo": "WenEnguang/Report_Agent",
-    "username": "WenEnguang"
-  },
-  "notes": {
-    "directory": "E:/Markdown"
-  },
-  "output_path": "docs/report_2026-08-31.md",
-  "language": "zh-CN",
-  "max_fetch_rounds": 3,
-  "min_tech_points": 3
-}
+# 最小可用输入（monthly_report_request_minimal）
+monthly_report_request_minimal:
+  time_range:
+    since: "2026-08-01"
+    until: "2026-08-31"
+  github:
+    repo: "owner/repo"
+    username: "your-github-username"
+  notes:
+    directory: "/absolute/path/to/notes-git-repo"
+
+# 扩展示例（monthly_report_request_full）
+monthly_report_request_full:
+  time_range:
+    since: "2026-08-01"
+    until: "2026-08-31"
+  github:
+    repo: "WenEnguang/Report_Agent"
+    username: "WenEnguang"
+    include_diff: true
+    max_files_per_commit: 3
+    max_chars_per_file_patch: 1200
+  notes:
+    directory: "/absolute/path/to/notes-git-repo"
+    max_chars_per_note: 4000
+    include_extensions:
+      - ".md"
+      - ".markdown"
+      - ".txt"
+  constraints:
+    max_fetch_rounds: 3
+    min_tech_points: 3
+    language: "zh-CN"
+  output:
+    output_path: "docs/report_2026-08-31.md"
+    write_file: true
+
+# 字段说明：
+# - time_range.since/until: 必填，日期格式 YYYY-MM-DD
+# - github.repo/github.username: 必填
+# - notes.directory: 必填，且建议为本地 Git 仓库绝对路径

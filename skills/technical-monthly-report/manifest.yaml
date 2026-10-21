@@ -1,0 +1,39 @@
+skill:
+  name: technical-monthly-report
+  version: 1.1.0
+  type: workflow-based
+  language: zh-CN
+
+entrypoints:
+  primary: SKILL.md
+  readme: README.md
+
+resources:
+  references:
+    - references/workflow.md
+  prompts:
+    - prompts/generate_report.md
+  examples:
+    - examples/input.yaml
+
+runtime_modes:
+  - name: agent_native
+    supported: true
+    description: 由支持 Skill 的 Agent/运行时直接解析并执行工作流契约。
+  - name: python_langgraph_adapter
+    supported: false
+    description: 本包不包含可执行 Python/LangGraph 实现，仅提供契约参考。
+
+contracts:
+  input: SKILL.md#3-输入契约input-contract
+  output: SKILL.md#4-输出契约output-contract
+
+permissions:
+  github_api_read: required
+  local_git_notes_read: required
+  llm_access: required
+  secrets_in_files_allowed: false
+
+executable_reference:
+  included: false
+  note: 若需可执行实现，请按 references/workflow.md 与 SKILL.md 契约自行实现。
