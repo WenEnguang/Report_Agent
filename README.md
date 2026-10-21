@@ -90,8 +90,8 @@ python-dotenv    环境变量管理
 
 ```bash
 # 1. 克隆并创建环境
-git clone https://github.com/WenEnguang/Github_Agent.git
-cd Github_Agent
+git clone https://github.com/WenEnguang/Report_Agent.git
+cd Report_Agent
 conda create -n langgraph python=3.11 -y
 conda activate langgraph
 
@@ -99,6 +99,7 @@ conda activate langgraph
 pip install langgraph langchain-openai requests python-dotenv
 
 # 3. 配置环境变量（复制 .env.example 为 .env 并填写）
+cp .env.example .env
 ```
 
 **`.env` 配置模板**（`NOTES_DIR` 指向你的本地笔记 git 仓库）：
@@ -138,6 +139,10 @@ docs/
 ├── GitHub数据流转说明.md    GitHub 链路数据流
 ├── Notes数据流转说明.md     笔记链路数据流
 └── report_*.md             生成的月报样例
+skills/
+└── technical-monthly-report/ 可复用 Skill（工作流定义 / 提示词 / 示例输入）
+test/
+└── *.py                    链路拆分调试脚本
 ```
 
 ---
